@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+#![allow(unused_variables)]
 use ndarray::{arr2, Array2, ArrayView2, Axis};
 use rand::seq::SliceRandom;
 use std::collections::HashMap;
@@ -307,8 +308,54 @@ impl<'a> Player<'a> {
         println!("{:#?}\nscore = {}", self.my_grid, self.my_score);
         false
     } // fn end_round_and_return_full_row
-
-    // fn finalize_score
+    fn finalize_score(&self) -> i32 {
+        let mut score_bonus = 0;
+        let mut num_rows = 0;
+        for row in self.my_grid.rows() {
+            let mut full_row: bool = true;
+            for cell in row {
+                if !cell {
+                    full_row = false;
+                    break;
+                }
+            }
+            if full_row {
+                num_rows += 1;
+            }
+        }
+        score_bonus += num_rows * 2;
+        let mut num_cols = 0;
+        for col in self.my_grid.columns() {
+            let mut full_col: bool = true;
+            for cell in col {
+                if !cell {
+                    full_col = false;
+                    break;
+                }
+            }
+            if full_col {
+                num_cols += 1;
+            }
+        }
+        score_bonus += num_cols * 7;
+        // TODO - 5 of a kind
+        let mut num_fives = 0;
+        for ii in 0..NUM_COLORS_AS_USIZE {
+            let mut all_five: bool = true;
+            for row_idx in 0..NUM_COLORS_AS_USIZE {
+                let col_idx = (5 + ii - row_idx) % 5;
+                if !self.my_grid[[row_idx, col_idx]] {
+                    all_five = false;
+                    break;
+                }
+            } // check each row for color ii
+            if all_five {
+                num_fives += 1;
+            }
+        } // iterate over all colors
+        score_bonus += num_fives * 10;
+        score_bonus
+    } // fn finalize_score
     fn get_score_penalty(num_penalties_for_round: &i32) -> i32 {
         let num_penalties: usize = *num_penalties_for_round as usize;
         if num_penalties >= PENALTY_POINTS.len() {
