@@ -1,8 +1,10 @@
 #![allow(dead_code)]
+#![allow(unused_mut)]
 #![allow(unused_variables)]
 use ndarray::{arr2, Array2, ArrayView2, Axis};
 use rand::seq::SliceRandom;
 use std::collections::HashMap;
+use std::num::ParseIntError;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum TileColor {
@@ -38,9 +40,21 @@ impl TileColor {
 }
 #[derive(Debug)] // TODO see if we can remove this
 enum InvalidMoveError {
-    BadColor,
-    BadFactoryRequest,
-    BadPoolRequest,
+    BadColorError,
+    BadFactoryRequestError,
+    BadPoolRequestError,
+    BadInputIoError(std::io::Error),
+    BadInputParseError(ParseIntError),
+    BadInputRowIdxError,
+}
+
+impl InvalidMoveError {
+    fn from_io(err: std::io::Error) -> InvalidMoveError {
+        InvalidMoveError::BadInputIoError(err)
+    }
+    fn from_parse(err: ParseIntError) -> InvalidMoveError {
+        InvalidMoveError::BadInputParseError(err)
+    }
 }
 
 const NUM_TILES_PER_COLOR: i32 = 20;
@@ -105,7 +119,7 @@ impl GameBoard {
         tile_color: &TileColor,
     ) -> Result<i32, InvalidMoveError> {
         if !self.valid_factory_request(factory_idx, tile_color) {
-            return Err(InvalidMoveError::BadFactoryRequest);
+            return Err(InvalidMoveError::BadFactoryRequestError);
         }
         let mut this_factory = self.tile_factories.remove(factory_idx);
         let num_tiles = this_factory
@@ -124,7 +138,7 @@ impl GameBoard {
     fn take_tiles_from_pool(&mut self, tile_color: &TileColor) -> Result<i32, InvalidMoveError> {
         let num_tiles: i32 = *self.tile_pool.get(&tile_color).unwrap_or(&0);
         if num_tiles == 0 {
-            return Err(InvalidMoveError::BadPoolRequest);
+            return Err(InvalidMoveError::BadPoolRequestError);
         }
         self.tile_pool
             .entry(*tile_color)
@@ -159,29 +173,40 @@ impl GameBoard {
         }
     } // fn deal_tiles
       // fn handle_request
-      // fn end_of_round -> bool
+    fn end_of_round(&self) -> bool {
+        // round ends when the pool and tile factories are empty
+        for ii in 0..NUM_COLORS {
+            if self.tile_pool[&TileColor::from(ii)] > 0 {
+                return false;
+            }
+        }
+        self.tile_factories.is_empty()
+    } // fn end_of_round
 } // impl GameBoard
 
 #[derive(Debug)]
-struct Player<'a> {
+struct Player {
     my_score: i32,
     my_num_penalties_for_round: i32,
     my_took_pool_penalty_this_round: bool,
     my_grid: Array2<bool>,
     my_rows: [(i32, TileColor); NUM_COLORS_AS_USIZE],
-    my_board_ref: &'a GameBoard,
     my_name: String,
 }
 
-impl<'a> Player<'a> {
-    pub fn new(my_name: String, my_board_ref: &'a GameBoard) -> Self {
+impl<'a> Player {
+    const PROMPT_DRAW_INPUT: &'a str = "What would you like to do?";
+    const PROMPT_FACTORY_DRAW: &'a str = "[f] take from factory ";
+    const PROMPT_POOL_DRAW: &'a str = "[p] take from pool ";
+    const PROMPT_DISCARD: &'a str = "[d] discard tile(s) ";
+    const PROMPT_PRINT_BOARD: &'a str = "[P] print game board";
+    pub fn new(my_name: String) -> Self {
         Player {
             my_score: 0,
             my_num_penalties_for_round: 0,
             my_took_pool_penalty_this_round: false,
             my_grid: arr2(&[[false; NUM_COLORS_AS_USIZE]; NUM_COLORS_AS_USIZE]),
             my_rows: [(0, TileColor::NOCOLOR); NUM_COLORS_AS_USIZE],
-            my_board_ref,
             my_name,
         }
     }
@@ -190,7 +215,7 @@ impl<'a> Player<'a> {
         //   grid doesn't already have this color on this row
         //   row is either empty or already has the same color
         if color == TileColor::NOCOLOR {
-            return Err(InvalidMoveError::BadColor);
+            return Err(InvalidMoveError::BadColorError);
         }
         let col_idx = (5 + color as usize - row_idx) % 5;
         if self.my_grid[[row_idx, col_idx]] {
@@ -244,7 +269,181 @@ impl<'a> Player<'a> {
         //TODO not right yet
         tile_score
     }
-    // fn take_turn
+    fn prompt_for_factory_idx(num_factories: usize) -> Result<usize, InvalidMoveError> {
+        println!("Which factory? enter index [1-5]");
+        let mut read_buf: String = String::new();
+        std::io::stdin()
+            .read_line(&mut read_buf)
+            .map_err(InvalidMoveError::from_io)?;
+        let idx = read_buf
+            .trim()
+            .parse::<usize>()
+            .map_err(InvalidMoveError::from_parse)?;
+        if idx > num_factories || idx < 1 {
+            return Err(InvalidMoveError::BadFactoryRequestError);
+        }
+        Ok(idx - 1)
+    } // fn prompt_for_factory_idx
+    fn prompt_for_tile_color() -> Result<TileColor, InvalidMoveError> {
+        println!("Which color? [r|b|g|y|w]");
+        let mut read_buf = String::new();
+        std::io::stdin()
+            .read_line(&mut read_buf)
+            .map_err(InvalidMoveError::from_io)?;
+        match read_buf.chars().next() {
+            Some('r') => Ok(TileColor::RED),
+            Some('b') => Ok(TileColor::BLUE),
+            Some('g') => Ok(TileColor::GREEN),
+            Some('y') => Ok(TileColor::YELLOW),
+            Some('w') => Ok(TileColor::WHITE),
+            Some(_) => Err(InvalidMoveError::BadColorError),
+            None => todo!(),
+        }
+    }
+    fn prompt_for_row_idx() -> Result<usize, InvalidMoveError> {
+        println!("Which row? enter number [1-5]");
+        let mut read_buf = String::new();
+        std::io::stdin()
+            .read_line(&mut read_buf)
+            .map_err(InvalidMoveError::from_io)?;
+        let row_idx = read_buf
+            .trim()
+            .parse::<usize>()
+            .map_err(InvalidMoveError::from_parse)?;
+        if row_idx < 1 || row_idx > 5 {
+            return Err(InvalidMoveError::BadInputRowIdxError);
+        }
+        Ok(row_idx - 1)
+    }
+    fn take_turn(&self) {
+        let mut full_input: bool = false;
+        // TODO - request state info from game board
+        // until then, use these fillers
+        let num_factories = 4;
+        let num_in_pool = 2;
+        let mut write_buf = String::new();
+        let mut read_buf = String::new();
+        while !full_input {
+            if num_factories > 0 {
+                write_buf += Self::PROMPT_FACTORY_DRAW;
+            }
+            if num_in_pool > 0 {
+                write_buf += Self::PROMPT_POOL_DRAW;
+            }
+            write_buf += Self::PROMPT_DISCARD;
+            write_buf += Self::PROMPT_PRINT_BOARD;
+            println!("{write_buf}");
+            write_buf.clear();
+            read_buf.clear();
+            match std::io::stdin()
+                .read_line(&mut read_buf)
+                .map_err(InvalidMoveError::from_io)
+            {
+                Ok(_) => (),
+                Err(error) => {
+                    println!("ERROR: {:?}; try again", error);
+                    continue;
+                }
+            }
+            match read_buf.chars().next().unwrap() {
+                'f' => {
+                    let factory_idx = match Self::prompt_for_factory_idx(num_factories) {
+                        Ok(idx) => idx,
+                        Err(error) => {
+                            println!("ERROR: {:?}; try again", error);
+                            continue;
+                        }
+                    };
+                    let tile_color: TileColor = match Self::prompt_for_tile_color() {
+                        Ok(color) => color,
+                        Err(error) => {
+                            println!("ERROR: {:?}; try again", error);
+                            continue;
+                        }
+                    };
+                    let row_idx = match Self::prompt_for_row_idx() {
+                        Ok(idx) => idx,
+                        Err(error) => {
+                            println!("ERROR: {:?}; try again", error);
+                            continue;
+                        }
+                    };
+                    println!(
+                        "selected move: draw {:?} from factory {}; place on row {}",
+                        tile_color,
+                        factory_idx + 1,
+                        row_idx + 1
+                    );
+                } // 'f'
+                'p' => {
+                    let tile_color: TileColor = match Self::prompt_for_tile_color() {
+                        Ok(color) => color,
+                        Err(error) => {
+                            println!("ERROR: {:?}; try again", error);
+                            continue;
+                        }
+                    };
+                    println!("selected move: draw {:?} from pool", tile_color);
+                } // 'p'
+                'd' => {
+                    let mut discard_input = String::new();
+                    println!("From factory or pool? [f|p]");
+                    match std::io::stdin()
+                        .read_line(&mut discard_input)
+                        .map_err(InvalidMoveError::from_io)
+                    {
+                        Ok(_) => (),
+                        Err(error) => {
+                            println!("INPUT ERROR: {:?} {}. Try again.", error, discard_input);
+                            continue;
+                        }
+                    }
+                    match discard_input.chars().next().unwrap() {
+                        'f' => {
+                            let factory_idx = match Self::prompt_for_factory_idx(num_factories) {
+                                Ok(idx) => idx,
+                                Err(error) => {
+                                    println!("ERROR: {:?}; try again", error);
+                                    continue;
+                                }
+                            };
+                            let tile_color = match Self::prompt_for_tile_color() {
+                                Ok(color) => color,
+                                Err(error) => {
+                                    println!("ERROR: {:?}; try again", error);
+                                    continue;
+                                }
+                            };
+                            println!(
+                                "selected move: discard {:?} from factory {}",
+                                tile_color,
+                                factory_idx + 1
+                            );
+                        }
+                        'p' => {
+                            let tile_color = match Self::prompt_for_tile_color() {
+                                Ok(color) => color,
+                                Err(error) => {
+                                    println!("ERROR: {:?}; try again", error);
+                                    continue;
+                                }
+                            };
+                            println!("selected move: discard {:?} from pool", tile_color);
+                        }
+                        _ => {
+                            println!("Invalid input! Try again.");
+                            continue;
+                        }
+                    } // discard input
+                } // 'd'
+                'P' => todo!(),
+                _ => {
+                    println!("Invalid input! Try again.");
+                    continue;
+                }
+            }
+        } // while !full_input
+    } // fn take_turn
     fn take_tiles_from_factory(
         &mut self,
         _factory_idx: usize,
@@ -264,8 +463,12 @@ impl<'a> Player<'a> {
         // TODO create request, send to board, recieve response
         true
     }
-    // fn discard_from_factory
-    // fn discard_from_pool
+    fn discard_from_factory(&self) {
+        todo!();
+    }
+    fn discard_from_pool(&self) {
+        todo!();
+    }
     fn place_tiles(&mut self, row_idx: usize, color: TileColor, num_tiles: i32) {
         self.my_rows[row_idx].0 += num_tiles;
         self.my_rows[row_idx].1 = color;
@@ -274,7 +477,7 @@ impl<'a> Player<'a> {
             self.my_num_penalties_for_round += self.my_rows[row_idx].0 - max_num_in_row;
             self.my_rows[row_idx].0 = max_num_in_row;
         }
-    }
+    } // fn place_tiles
     fn end_round_and_return_full_row(&mut self) -> bool {
         for (row_idx, row) in self.my_rows.iter_mut().enumerate() {
             if row.0 == (row_idx + 1).try_into().unwrap() {
@@ -362,10 +565,14 @@ impl<'a> Player<'a> {
             return PENALTY_POINTS[PENALTY_POINTS.len() - 1];
         }
         PENALTY_POINTS[num_penalties]
+    } // fn get_score_penalty
+    fn took_penalty(&self) -> bool {
+        self.my_took_pool_penalty_this_round
     }
     // implement display trait to print?
 } // impl PLayer
 
+#[test]
 fn test_tile_score() {
     let mut arr = [[false; NUM_COLORS_AS_USIZE]; NUM_COLORS_AS_USIZE];
     arr[1][1] = true;
@@ -375,14 +582,40 @@ fn test_tile_score() {
     arr[1][3] = true;
     let grid = arr2(&arr);
     println!("{:#?}", grid);
-    let score2 = Player::score_tile(&grid.view(), &1, &3);
-    println!("tile score: {}", score2);
+    let score = Player::score_tile(&grid.view(), &2, &1);
+    assert_eq!(score, 5);
 }
 
-fn main() {
+fn run_game() {
     let mut game_board = GameBoard::new();
-    game_board.deal_tiles();
-    let _player_1: Player = Player::new(String::from("Player1"), &game_board);
-    //     println!("Show game board: {:#?}", game_board);
-    //     println!("Show player1: {:#?}", player_1);
+    let mut player_1 = Player::new(String::from("Player1"));
+    let mut player_2 = Player::new(String::from("Player2"));
+    let mut players: Vec<&mut Player> = vec![&mut player_1, &mut player_2]; // TODO see if we can make this less mutable
+    let mut end_game: bool = false;
+    let mut first_player_idx = 0;
+    let num_players = players.len();
+    while !end_game {
+        game_board.deal_tiles();
+        while !game_board.end_of_round() {
+            for ii in 0..num_players {
+                let idx = (ii + first_player_idx) % num_players;
+                players[idx].take_turn();
+            }
+        } // !game_board.end_of_round()
+        for (ii, player) in players.iter().enumerate() {
+            if player.took_penalty() {
+                first_player_idx = ii;
+            }
+        }
+        for player in &mut players {
+            if player.end_round_and_return_full_row() {
+                end_game = true;
+            }
+        }
+    } // !end_game
+      // finalize scores, print results
+} // fn run_game
+
+fn main() {
+    run_game();
 }
