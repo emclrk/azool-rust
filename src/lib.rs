@@ -5,26 +5,26 @@ use ndarray::{arr2, Array2, ArrayView2, Axis};
 use rand::seq::SliceRandom;
 use std::collections::HashMap;
 use std::num::ParseIntError;
+use std::fmt;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum TileColor {
-    NOCOLOR,
     RED,
     BLUE,
     GREEN,
     YELLOW,
     WHITE,
+    NOCOLOR,
 }
-
 impl TileColor {
     pub fn into(&self) -> i32 {
         match self {
-            TileColor::NOCOLOR => -1,
             TileColor::RED => 0,
             TileColor::BLUE => 1,
             TileColor::GREEN => 2,
             TileColor::YELLOW => 3,
             TileColor::WHITE => 4,
+            TileColor::NOCOLOR => 99,
         }
     }
     pub fn from(input: i32) -> Self {
@@ -46,6 +46,7 @@ enum InvalidMoveError {
     BadInputIoError(std::io::Error),
     BadInputParseError(ParseIntError),
     BadInputRowIdxError,
+    UnknownError,
 }
 
 impl InvalidMoveError {
@@ -217,12 +218,12 @@ impl<'a> Player {
         if color == TileColor::NOCOLOR {
             return Err(InvalidMoveError::BadColorError);
         }
-        let col_idx = (5 + color as usize - row_idx) % 5;
+        let col_idx = get_col_idx(row_idx, color);
         if self.my_grid[[row_idx, col_idx]] {
             return Ok(false); // already have that color on this row
         }
-        if !(self.my_rows[row_idx as usize].1 == color
-            || self.my_rows[row_idx as usize].1 == TileColor::NOCOLOR)
+        if !(self.my_rows[row_idx].1 == color
+            || self.my_rows[row_idx].1 == TileColor::NOCOLOR)
         {
             return Ok(false);
         }
@@ -297,7 +298,7 @@ impl<'a> Player {
             Some('y') => Ok(TileColor::YELLOW),
             Some('w') => Ok(TileColor::WHITE),
             Some(_) => Err(InvalidMoveError::BadColorError),
-            None => todo!(),
+            None => Err(InvalidMoveError::UnknownError),
         }
     }
     fn prompt_for_row_idx() -> Result<usize, InvalidMoveError> {
@@ -436,12 +437,12 @@ impl<'a> Player {
                         }
                     } // discard input
                 } // 'd'
-                'P' => todo!(),
+                'P' => todo!(),  // TODO: print board
                 _ => {
                     println!("Invalid input! Try again.");
                     continue;
                 }
-            }
+            }  // match read_buf.chars().next().unwrap()
         } // while !full_input
     } // fn take_turn
     fn take_tiles_from_factory(
@@ -464,10 +465,10 @@ impl<'a> Player {
         true
     }
     fn discard_from_factory(&self) {
-        todo!();
+        todo!();  // discard_from_factory
     }
     fn discard_from_pool(&self) {
-        todo!();
+        todo!();  // discard_from_pool
     }
     fn place_tiles(&mut self, row_idx: usize, color: TileColor, num_tiles: i32) {
         self.my_rows[row_idx].0 += num_tiles;
@@ -481,6 +482,7 @@ impl<'a> Player {
     fn end_round_and_return_full_row(&mut self) -> bool {
         for (row_idx, row) in self.my_rows.iter_mut().enumerate() {
             if row.0 == (row_idx + 1).try_into().unwrap() {
+                // TODO -- fix this to use the function get_col_idx(row_idx:usize, color:TileColor)
                 let col: usize = ((5 + TileColor::into(&row.1) - row_idx as i32) % 5)
                     .try_into()
                     .unwrap();
@@ -546,7 +548,7 @@ impl<'a> Player {
         for ii in 0..NUM_COLORS_AS_USIZE {
             let mut all_five: bool = true;
             for row_idx in 0..NUM_COLORS_AS_USIZE {
-                let col_idx = (5 + ii - row_idx) % 5;
+                let col_idx : usize = (5 + ii - row_idx) % 5;
                 if !self.my_grid[[row_idx, col_idx]] {
                     all_five = false;
                     break;
@@ -570,8 +572,25 @@ impl<'a> Player {
         self.my_took_pool_penalty_this_round
     }
     // implement display trait to print?
+    fn to_string(&self) -> String {
+       format!("***************************\nPLAYER: {}\n", self.my_name)
+    }
 } // impl PLayer
 
+impl fmt::Display for Player {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        self.to_string();
+        Ok(())
+    }
+}
+fn get_col_idx(row_idx:usize, color:TileColor)->usize {
+        (5 + color as usize + row_idx) % 5
+}
+
+pub fn print_player() {
+    let p1 = Player::new("P1".to_string());
+    println!("{:#?}", p1);
+}
 #[test]
 fn test_tile_score() {
     let mut arr = [[false; NUM_COLORS_AS_USIZE]; NUM_COLORS_AS_USIZE];
@@ -581,9 +600,23 @@ fn test_tile_score() {
     arr[2][3] = true;
     arr[1][3] = true;
     let grid = arr2(&arr);
-    println!("{:#?}", grid);
+    //println!("{:#?}", grid);
     let score = Player::score_tile(&grid.view(), &2, &1);
     assert_eq!(score, 5);
+}
+#[test]
+fn test_score_bonuses() {
+    let mut arr = [[false; NUM_COLORS_AS_USIZE]; NUM_COLORS_AS_USIZE];
+    for idx in 0..NUM_COLORS_AS_USIZE {
+        // setting row 1 and col 1
+        // arr[idx][1] = true;
+        // arr[1][idx] = true;
+        // setting all blues
+        let blue_col_idx = get_col_idx(idx, TileColor::BLUE);
+        arr[idx][blue_col_idx] = true;
+        println!("setting [{idx},{blue_col_idx}]{}", TileColor::BLUE as usize);
+    }
+    println!("{:#?}", arr2(&arr));
 }
 
 pub fn run_game() {
