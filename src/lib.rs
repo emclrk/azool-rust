@@ -1,13 +1,17 @@
 #![allow(dead_code)]
 #![allow(unused_mut)]
 #![allow(unused_variables)]
+use json;
+use json::object;
 use ndarray::{arr2, Array2, ArrayView2, Axis};
 use rand::seq::SliceRandom;
 use std::collections::HashMap;
-use std::num::ParseIntError;
 use std::fmt;
+use std::num::ParseIntError;
+use strum_macros::Display;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Display)]
 enum TileColor {
     RED,
     BLUE,
@@ -17,7 +21,7 @@ enum TileColor {
     NOCOLOR,
 }
 impl TileColor {
-    pub fn into(&self) -> i32 {
+    pub fn to_integer(&self) -> i32 {
         match self {
             TileColor::RED => 0,
             TileColor::BLUE => 1,
@@ -27,7 +31,7 @@ impl TileColor {
             TileColor::NOCOLOR => 99,
         }
     }
-    pub fn from(input: i32) -> Self {
+    pub fn from_integer(input: i32) -> Self {
         match input {
             0 => TileColor::RED,
             1 => TileColor::BLUE,
@@ -48,7 +52,6 @@ enum InvalidMoveError {
     BadInputRowIdxError,
     UnknownError,
 }
-
 impl InvalidMoveError {
     fn from_io(err: std::io::Error) -> InvalidMoveError {
         InvalidMoveError::BadInputIoError(err)
@@ -57,7 +60,24 @@ impl InvalidMoveError {
         InvalidMoveError::BadInputParseError(err)
     }
 }
-
+enum AzoolRequestType {
+    ReqTypeDrawFromFactory,
+    ReqTypeDrawFromPool,
+    ReqTypeReturnToBag,
+    ReqTypeGetBoard,
+    ReqTypeBeginTurn,
+}
+impl AzoolRequestType {
+    fn get_string(&self) -> String {
+        match self {
+            AzoolRequestType::ReqTypeDrawFromFactory => String::from("DRAW_FROM_FACTORY"),
+            AzoolRequestType::ReqTypeDrawFromPool => String::from("DRAW_FROM_POOL"),
+            AzoolRequestType::ReqTypeReturnToBag => String::from("RETURN_TO_BAG"),
+            AzoolRequestType::ReqTypeGetBoard => String::from("GET_BOARD"),
+            AzoolRequestType::ReqTypeBeginTurn => String::from("TAKE_TURN"),
+        }
+    }
+}
 const NUM_TILES_PER_COLOR: i32 = 20;
 const NUM_COLORS: i32 = 5;
 const NUM_COLORS_AS_USIZE: usize = NUM_COLORS as usize;
@@ -87,6 +107,7 @@ impl GameBoard {
             last_round: false,
         }; // GameBoard
         gb.reset_board();
+        gb.deal_tiles();
         gb
     } // fn new
     fn reset_board(&mut self) {
@@ -96,15 +117,39 @@ impl GameBoard {
             .reserve((NUM_COLORS * NUM_TILES_PER_COLOR).try_into().unwrap());
         for ii in 0..NUM_COLORS {
             self.tile_pool
-                .entry(TileColor::from(ii))
+                .entry(TileColor::from_integer(ii))
                 .and_modify(|ct| *ct = 0)
                 .or_insert(0);
             for _ in 0..NUM_TILES_PER_COLOR {
-                self.tile_bag.push(TileColor::from(ii));
+                self.tile_bag.push(TileColor::from_integer(ii));
             }
         }
         self.white_tile_in_pool = true;
     } // fn reset_board
+    fn serialize_game_board(&self) -> json::JsonValue {
+        let mut fact_array = json::JsonValue::new_array();
+        for fact in &self.tile_factories {
+            let mut one_factory = json::JsonValue::new_object();
+            for (color, count) in fact.iter() {
+              let _ = one_factory.insert(&color.to_string(), *count);
+            }
+            let _ = fact_array.push(one_factory);
+        }
+        let mut pool_tree = json::JsonValue::new_object();
+        let mut num_tiles_in_pool = 0;
+        for (color, count) in &self.tile_pool {
+            let _ = pool_tree.insert(&color.to_string(), *count);
+            num_tiles_in_pool += *count;
+        }
+        println!("# tiles in pool: {}", num_tiles_in_pool);
+        object!{
+            "num_factories" : fact_array.len(),
+            "factories" : fact_array,
+            "num_tiles_in_pool": num_tiles_in_pool,
+            "pool": pool_tree,
+            "end_of_round" : self.end_of_round()
+        }
+    }
     fn valid_factory_request(&self, factory_idx: usize, tile_color: &TileColor) -> bool {
         // index is valid, key is valid, count for that key is > 0
         factory_idx < self.tile_factories.len()
@@ -177,7 +222,7 @@ impl GameBoard {
     fn end_of_round(&self) -> bool {
         // round ends when the pool and tile factories are empty
         for ii in 0..NUM_COLORS {
-            if self.tile_pool[&TileColor::from(ii)] > 0 {
+            if self.tile_pool[&TileColor::from_integer(ii)] > 0 {
                 return false;
             }
         }
@@ -192,7 +237,9 @@ struct Player {
     my_took_pool_penalty_this_round: bool,
     my_grid: Array2<bool>,
     my_rows: [(i32, TileColor); NUM_COLORS_AS_USIZE],
-    my_name: String,
+    my_player_id:u8,
+    my_tx_to_gb: mpsc::Sender<json::JsonValue>,
+    my_rx_from_gb: mpsc::Receiver<json::JsonValue>,
 }
 
 impl<'a> Player {
@@ -201,14 +248,16 @@ impl<'a> Player {
     const PROMPT_POOL_DRAW: &'a str = "[p] take from pool ";
     const PROMPT_DISCARD: &'a str = "[d] discard tile(s) ";
     const PROMPT_PRINT_BOARD: &'a str = "[P] print game board";
-    pub fn new(my_name: String) -> Self {
+    pub fn new(my_player_id: u8, my_tx_to_gb: mpsc::Sender<json::JsonValue>, my_rx_from_gb:mpsc::Receiver<json::JsonValue>) -> Self {
         Player {
             my_score: 0,
             my_num_penalties_for_round: 0,
             my_took_pool_penalty_this_round: false,
             my_grid: arr2(&[[false; NUM_COLORS_AS_USIZE]; NUM_COLORS_AS_USIZE]),
             my_rows: [(0, TileColor::NOCOLOR); NUM_COLORS_AS_USIZE],
-            my_name,
+            my_player_id,
+            my_tx_to_gb,
+            my_rx_from_gb,
         }
     }
     fn check_valid_move(&self, color: TileColor, row_idx: usize) -> Result<bool, InvalidMoveError> {
@@ -315,6 +364,10 @@ impl<'a> Player {
         Ok(row_idx - 1)
     }
     fn take_turn(&self) {
+        let msg = self.my_rx_from_gb.recv().unwrap();
+        if msg["current_player"] != self.my_player_id {
+            return;
+        }
         let mut full_input: bool = false;
         // TODO - request state info from game board
         // until then, use these fillers
@@ -322,6 +375,7 @@ impl<'a> Player {
         let num_in_pool = 2;
         let mut write_buf = String::new();
         let mut read_buf = String::new();
+        println!("Player {}'s turn!", self.my_player_id);
         while !full_input {
             if num_factories > 0 {
                 write_buf += Self::PROMPT_FACTORY_DRAW;
@@ -373,6 +427,7 @@ impl<'a> Player {
                         factory_idx + 1,
                         row_idx + 1
                     );
+                    self.take_tiles_from_factory(factory_idx, tile_color, row_idx);
                 } // 'f'
                 'p' => {
                     let tile_color: TileColor = match Self::prompt_for_tile_color() {
@@ -382,7 +437,19 @@ impl<'a> Player {
                             continue;
                         }
                     };
-                    println!("selected move: draw {:?} from pool", tile_color);
+                    let row_idx = match Self::prompt_for_row_idx() {
+                        Ok(idx) => idx,
+                        Err(error) => {
+                            println!("ERROR: {:?}; try again", error);
+                            continue;
+                        }
+                    };
+                    println!(
+                        "selected move: draw {:?} from pool; place on row {:?}",
+                        tile_color,
+                        row_idx + 1
+                    );
+                    self.take_tiles_from_pool(tile_color, row_idx);
                 } // 'p'
                 'd' => {
                     let mut discard_input = String::new();
@@ -418,6 +485,7 @@ impl<'a> Player {
                                 tile_color,
                                 factory_idx + 1
                             );
+                            self.discard_from_factory(factory_idx, tile_color);
                         }
                         'p' => {
                             let tile_color = match Self::prompt_for_tile_color() {
@@ -428,6 +496,7 @@ impl<'a> Player {
                                 }
                             };
                             println!("selected move: discard {:?} from pool", tile_color);
+                            self.discard_from_pool(tile_color);
                         }
                         _ => {
                             println!("Invalid input! Try again.");
@@ -444,28 +513,30 @@ impl<'a> Player {
         } // while !full_input
     } // fn take_turn
     fn take_tiles_from_factory(
-        &mut self,
-        _factory_idx: usize,
+        &self,
+        factory_idx: usize,
         color: TileColor,
         row_idx: usize,
     ) -> bool {
         if !self.check_valid_move(color, row_idx).unwrap() {
             return false;
         }
+        let request = object!{"req_type": AzoolRequestType::ReqTypeDrawFromFactory.get_string(), "tile_color": color.to_integer(), "factory_idx": factory_idx};
+        self.my_tx_to_gb.send(request).unwrap();
         true
         // TODO create request, send to board, recieve response
     }
-    fn take_tiles_from_pool(&mut self, color: TileColor, row_idx: usize) -> bool {
+    fn take_tiles_from_pool(&self, color: TileColor, row_idx: usize) -> bool {
         if !self.check_valid_move(color, row_idx).unwrap() {
             return false;
         }
         // TODO create request, send to board, recieve response
         true
     }
-    fn discard_from_factory(&self) {
+    fn discard_from_factory(&self, factory_idx: usize, color: TileColor) {
         todo!(); // discard_from_factory
     }
-    fn discard_from_pool(&self) {
+    fn discard_from_pool(&self, color:TileColor) {
         todo!(); // discard_from_pool
     }
     fn place_tiles(&mut self, row_idx: usize, color: TileColor, num_tiles: i32) {
@@ -479,7 +550,7 @@ impl<'a> Player {
     } // fn place_tiles
     fn end_round_and_return_full_row(&mut self) -> bool {
         for (row_idx, row) in self.my_rows.iter_mut().enumerate() {
-            if row.0 == (row_idx + 1).try_into().unwrap() {
+            if row.0 == TryInto::<i32>::try_into(row_idx + 1).unwrap() {
                 let col: usize = get_col_idx(row_idx, row.1);
                 // println!("row: {} col: {}", row_idx, col);
                 self.my_grid[[row_idx, col]] = true;
@@ -520,7 +591,7 @@ impl<'a> Player {
     }
     // implement display trait to print?
     fn to_string(&self) -> String {
-        format!("***************************\nPLAYER: {}\n", self.my_name)
+        format!("***************************\nPLAYER: {}\n", self.my_player_id)
     }
 } // impl PLayer
 impl fmt::Display for Player {
@@ -564,7 +635,7 @@ fn finalize_score(grid: &Array2<bool>) -> i32 {
     for ii in 0..NUM_COLORS_AS_USIZE {
         let mut all_five: bool = true;
         for row_idx in 0..NUM_COLORS_AS_USIZE {
-            let col_idx: usize = get_col_idx(row_idx, TileColor::from(ii as i32));
+            let col_idx: usize = get_col_idx(row_idx, TileColor::from_integer(ii as i32));
             if !grid[[row_idx, col_idx]] {
                 all_five = false;
                 break;
@@ -584,7 +655,9 @@ fn get_col_idx(row_idx: usize, color: TileColor) -> usize {
 }
 
 pub fn print_player() {
-    let p1 = Player::new("P1".to_string());
+    let (tx, _) = mpsc::channel();
+    let (_, rx) = mpsc::channel();
+    let p1 = Player::new(0, tx, rx);
     println!("{:#?}", p1);
 }
 #[test]
@@ -622,32 +695,58 @@ fn test_score_bonuses() {
     assert_eq!(finalize_score(&arr2(&arr)), 10);
 }
 
+use std::sync::mpsc;
+use std::thread;
 pub fn run_game() {
     let mut game_board = GameBoard::new();
-    let mut player_1 = Player::new(String::from("Player1"));
-    let mut player_2 = Player::new(String::from("Player2"));
-    let mut players: Vec<&mut Player> = vec![&mut player_1, &mut player_2]; // TODO see if we can make this less mutable
+    println!("{:#?}", game_board.serialize_game_board()["num_tiles_in_pool"]);
+    let (player1_to_gameboard_sender, player1_to_gameboard_receiver) = mpsc::channel();
+    let (player2_to_gameboard_sender, player2_to_gameboard_receiver) = mpsc::channel();
+    let (tx_gb_to_p1, rx_gb_to_p1) = mpsc::channel();
+    let (tx_gb_to_p2, rx_gb_to_p2) = mpsc::channel();
+    let mut player_1 = Player::new(22, player1_to_gameboard_sender, rx_gb_to_p1);
+    let mut player_2 = Player::new(7, player2_to_gameboard_sender, rx_gb_to_p2);
+    let p1_handle = thread::spawn(move || {
+        let mut game_over = false;
+        while !game_over {
+                player_1.take_turn();
+            }
+    });
+    let p2_handle = thread::spawn(move || {
+        let mut game_over = false;
+        while !game_over {
+                player_2.take_turn();
+            }
+    });
+    // let mut players: Vec<&mut Player> = vec![&mut player_1, &mut player_2];
+    // TODO see if we can make this less mutable
     let mut end_game: bool = false;
     let mut first_player_idx = 0;
-    let num_players = players.len();
+    // let num_players = players.len();
+    let take_turn_req =
+        object! {"req_type" : AzoolRequestType::ReqTypeBeginTurn.get_string(), "game_over" : false, "current_player" : 22};
+    let num_players = 2;
     while !end_game {
         game_board.deal_tiles();
         while !game_board.end_of_round() {
-            for ii in 0..num_players {
-                let idx = (ii + first_player_idx) % num_players;
-                players[idx].take_turn();
-            }
+            tx_gb_to_p1.send(take_turn_req.clone()).unwrap();
+              //             for ii in 0..num_players {
+              //                 let idx = (ii + first_player_idx) % num_players;
+              //                 // players[idx].take_turn();  // send turn request to each player in turn
+              //             }
         } // !game_board.end_of_round()
-        for (ii, player) in players.iter().enumerate() {
-            if player.took_penalty() {
-                first_player_idx = ii;
-            }
-        }
-        for player in &mut players {
-            if player.end_round_and_return_full_row() {
-                end_game = true;
-            }
-        }
+          /*
+          for (ii, player) in players.iter().enumerate() {
+              if player.took_penalty() {
+                  first_player_idx = ii;
+              }
+          }
+          for player in &mut players {
+              if player.end_round_and_return_full_row() {
+                  end_game = true;
+              }
+          }
+          */
     } // !end_game
       // finalize scores, print results
 } // fn run_game
