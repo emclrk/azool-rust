@@ -97,6 +97,8 @@ impl InvalidMoveError {
 enum AzoolRequestType {
     ReqTypeDrawFromFactory,
     ReqTypeDrawFromPool,
+    ReqTypeDiscardFromFactory,
+    ReqTypeDiscardFromPool,
     ReqTypeReturnToBag,
     ReqTypeGetBoard,
     ReqTypeBeginTurn,
@@ -108,6 +110,8 @@ impl AzoolRequestType {
         match self {
             AzoolRequestType::ReqTypeDrawFromFactory => String::from("DRAW_FROM_FACTORY"),
             AzoolRequestType::ReqTypeDrawFromPool => String::from("DRAW_FROM_POOL"),
+            AzoolRequestType::ReqTypeDiscardFromFactory => String::from("DISCARD_FROM_FACTORY"),
+            AzoolRequestType::ReqTypeDiscardFromPool => String::from("DISCARD_FROM_POOL"),
             AzoolRequestType::ReqTypeReturnToBag => String::from("RETURN_TO_BAG"),
             AzoolRequestType::ReqTypeGetBoard => String::from("GET_BOARD"),
             AzoolRequestType::ReqTypeBeginTurn => String::from("TAKE_TURN"),
@@ -119,6 +123,8 @@ impl AzoolRequestType {
         match val {
             "DRAW_FROM_FACTORY" => AzoolRequestType::ReqTypeDrawFromFactory,
             "DRAW_FROM_POOL" => AzoolRequestType::ReqTypeDrawFromPool,
+            "DISCARD_FROM_FACTORY" => AzoolRequestType::ReqTypeDiscardFromFactory,
+            "DISCARD_FROM_POOL" => AzoolRequestType::ReqTypeDiscardFromPool,
             "RETURN_TO_BAG" => AzoolRequestType::ReqTypeReturnToBag,
             "GET_BOARD" => AzoolRequestType::ReqTypeGetBoard,
             "TAKE_TURN" => AzoolRequestType::ReqTypeBeginTurn,
@@ -219,8 +225,8 @@ impl GameBoard {
                     }
                     Err(error) => {
                         let _ = response.insert("success", false);
-                        // response["error_type"] = error; // TODO
-                        todo!();
+                        let _ = response.insert("num_tiles_returned", 0);
+                        response["error_type"] = "Invalid move".into();
                     }
                 }
             }
@@ -232,11 +238,17 @@ impl GameBoard {
                         // response["status"] = "success";  // todo this was in the old version, but is it necessary?
                         let _ = response.insert("success", true);
                         let _ = response.insert("num_tiles_returned", num);
+                        if self.white_tile_in_pool {
+                            let _ = response.insert("pool_penalty", true);
+                            self.white_tile_in_pool = false;
+                        } else {
+                            let _ = response.insert("pool_penalty", false);
+                        }
                     }
                     Err(error) => {
                         let _ = response.insert("success", false);
-                        // response["error_type"] = error; // TODO
-                        todo!();
+                        let _ = response.insert("num_tiles_returned", 0);
+                        response["error_type"] = "Invalid move".into();
                     }
                 }
             }
@@ -253,6 +265,8 @@ impl GameBoard {
             // used for the gameboard to tell the player it's their turn. doesn't make sense here
             AzoolRequestType::ReqTypeBeginTurn => return Err(InvalidMoveError::BadRequestError),
             AzoolRequestType::ReqTypeTurnFinished => todo!(), // i dont think (?) this should happen?
+            AzoolRequestType::ReqTypeDiscardFromFactory => todo!(),
+            AzoolRequestType::ReqTypeDiscardFromPool => todo!(),
             AzoolRequestType::ReqTypeInvalid => return Err(InvalidMoveError::BadRequestError),
         } // match msg_type
         Ok(response)
@@ -511,7 +525,7 @@ impl<'a> Player {
             lines.push_str(format!{"{} x {}\n", TileColor::from_string(color_str).color_string(), num.as_i32().unwrap()}.as_str());
         }
         for ii in 0..NUM_COLORS_AS_USIZE {
-            lines.push_str(format! {"{ii}) "}.as_str());
+            lines.push_str(format! {"{}) ", ii+1}.as_str());
             for jj in ii + 1..NUM_COLORS_AS_USIZE {
                 lines.push_str(" ");
             }
@@ -647,7 +661,10 @@ impl<'a> Player {
                         tile_color,
                         row_idx + 1
                     );
-                    self.take_tiles_from_pool(tile_color, row_idx);
+                    if !self.take_tiles_from_pool(tile_color, row_idx) {
+                        continue;
+                    }
+                    full_input = true;
                 } // 'p'
                 'd' => {
                     let mut discard_input = String::new();
@@ -683,7 +700,10 @@ impl<'a> Player {
                                 tile_color,
                                 factory_idx + 1
                             );
-                            self.discard_from_factory(factory_idx, tile_color);
+                            if !self.discard_from_factory(factory_idx, tile_color) {
+                                continue;
+                            }
+                            full_input = true;
                         }
                         'p' => {
                             let tile_color = match Self::prompt_for_tile_color() {
@@ -694,7 +714,10 @@ impl<'a> Player {
                                 }
                             };
                             println!("selected move: discard {:?} from pool", tile_color);
-                            self.discard_from_pool(tile_color);
+                            if !self.discard_from_pool(tile_color) {
+                                continue;
+                            }
+                            full_input = true;
                         }
                         _ => {
                             println!("Invalid input! Try again.");
@@ -704,7 +727,6 @@ impl<'a> Player {
                 } // 'd'
                 'P' => {
                     let ans = self.request_game_board();
-                    println!("ans: {:?}", ans);
                     self.print_board(ans);
                 }
                 _ => {
@@ -713,12 +735,11 @@ impl<'a> Player {
                 }
             } // match read_buf.chars().next().unwrap()
         } // while !full_input
-          //
         let request = object! {"req_type": AzoolRequestType::ReqTypeTurnFinished.get_string(), "current_player" : self.my_player_id};
         self.my_tx_to_gb.send(request).unwrap();
     } // fn take_turn
     fn take_tiles_from_factory(
-        &self,
+        &mut self,
         factory_idx: usize,
         color: TileColor,
         row_idx: usize,
@@ -726,24 +747,62 @@ impl<'a> Player {
         if !self.check_valid_move(color, row_idx).unwrap() {
             return false;
         }
-        let request = object! {"req_type": AzoolRequestType::ReqTypeDrawFromFactory.get_string(), "tile_color": color.to_integer(), "factory_idx": factory_idx, "current_player" : self.my_player_id};
+        let request = object! {"req_type": AzoolRequestType::ReqTypeDrawFromFactory.get_string(), "tile_color": color.to_integer(),
+        "factory_idx": factory_idx, "current_player" : self.my_player_id};
         self.my_tx_to_gb.send(request).unwrap();
         let msg = self.my_rx_from_gb.recv().unwrap();
-        msg["success"].as_bool().unwrap()
-        // TODO create request, send to board, recieve response
+        let success: bool = msg["success"].as_bool().unwrap();
+        if success {
+            let num_tiles: i32 = msg["num_tiles_returned"].as_i32().unwrap();
+            self.place_tiles(row_idx, color, num_tiles);
+        }
+        success
     }
-    fn take_tiles_from_pool(&self, color: TileColor, row_idx: usize) -> bool {
+    fn take_tiles_from_pool(&mut self, color: TileColor, row_idx: usize) -> bool {
         if !self.check_valid_move(color, row_idx).unwrap() {
             return false;
         }
-        // TODO create request, send to board, recieve response
-        true
+        let request = object! {"req_type" : AzoolRequestType::ReqTypeDrawFromPool.get_string(), "tile_color": color.to_integer(), "current_player" : self.my_player_id};
+        self.my_tx_to_gb.send(request).unwrap();
+        let msg = self.my_rx_from_gb.recv().unwrap();
+        let success: bool = msg["success"].as_bool().unwrap();
+        if success {
+            let num_tiles: i32 = msg["num_tiles_returned"].as_i32().unwrap();
+            self.place_tiles(row_idx, color, num_tiles);
+            if msg["pool_penalty"].as_bool().unwrap() {
+                self.my_took_pool_penalty_this_round = true;
+            }
+        }
+        success
     }
-    fn discard_from_factory(&self, factory_idx: usize, color: TileColor) {
-        todo!(); // discard_from_factory
+    fn discard_from_factory(&mut self, factory_idx: usize, color: TileColor) -> bool {
+        let request = object! {"req_type" : AzoolRequestType::ReqTypeDiscardFromFactory.get_string(), "tile_color": color.to_integer(), "factory_idx":factory_idx, "current_player" : self.my_player_id};
+        self.my_tx_to_gb.send(request).unwrap();
+        let msg = self.my_rx_from_gb.recv().unwrap();
+        let success: bool = msg["success"].as_bool().unwrap();
+        if success {
+            let num_tiles: i32 = msg["num_tiles_returned"].as_i32().unwrap();
+            self.my_num_penalties_for_round += num_tiles;
+            let request = object! {"req_type" : AzoolRequestType::ReqTypeReturnToBag.get_string(), "tile_color":color.to_integer(), "num_tiles_returned":num_tiles, "current_player" : self.my_player_id};
+            self.my_tx_to_gb.send(request).unwrap();
+        }
+        success
     }
-    fn discard_from_pool(&self, color: TileColor) {
-        todo!(); // discard_from_pool
+    fn discard_from_pool(&mut self, color: TileColor) -> bool {
+        let request = object! {"req_type" : AzoolRequestType::ReqTypeDiscardFromPool.get_string(), "tile_color": color.to_integer(), "current_player" : self.my_player_id};
+        self.my_tx_to_gb.send(request).unwrap();
+        let msg = self.my_rx_from_gb.recv().unwrap();
+        let success: bool = msg["success"].as_bool().unwrap();
+        if success {
+            if msg["pool_penalty"].as_bool().unwrap() {
+                self.my_num_penalties_for_round += 1;
+            }
+            let num_tiles: i32 = msg["num_tiles_returned"].as_i32().unwrap();
+            self.my_num_penalties_for_round += num_tiles;
+            let request = object! {"req_type" : AzoolRequestType::ReqTypeReturnToBag.get_string(), "tile_color":color.to_integer(), "num_tiles_returned":num_tiles, "current_player" : self.my_player_id};
+            self.my_tx_to_gb.send(request).unwrap();
+        }
+        success
     }
     fn place_tiles(&mut self, row_idx: usize, color: TileColor, num_tiles: i32) {
         self.my_rows[row_idx].0 += num_tiles;
