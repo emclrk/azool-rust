@@ -1,12 +1,8 @@
-#![allow(dead_code)]
-#![allow(unused_mut)]
-#![allow(unused_variables)]
 use json;
 use json::object;
 use ndarray::{arr2, Array2, ArrayView2, Axis};
 use rand::seq::SliceRandom;
 use std::collections::HashMap;
-use std::fmt;
 use std::num::ParseIntError;
 use std::sync::mpsc;
 use std::thread;
@@ -52,9 +48,6 @@ impl TileColor {
             TileColor::NOCOLOR => String::from(" "),
         }
     }
-    pub fn int_to_color_string(input: i32) -> String {
-        TileColor::from_integer(input).color_string()
-    }
     pub fn from_string(input: &str) -> Self {
         match input {
             "RED" => TileColor::RED,
@@ -84,7 +77,6 @@ enum InvalidMoveError {
     BadInputIoError(std::io::Error),
     BadInputParseError(ParseIntError),
     BadInputRowIdxError,
-    BadRequestError,
     UnknownError,
 }
 impl InvalidMoveError {
@@ -151,26 +143,24 @@ const PENALTY_POINTS: [i32; 9] = [0, 1, 2, 3, 5, 7, 10, 13, 15];
 
 #[derive(Debug)]
 struct GameBoard {
-    my_num_players: i32,
+    _my_num_players: i32,
     max_num_factories: i32,
     tile_pool: HashMap<TileColor, i32>,
     tile_bag: Vec<TileColor>,
     tile_factories: Vec<HashMap<TileColor, i32>>,
     white_tile_in_pool: bool,
-    last_round: bool,
 }
 
 impl GameBoard {
     pub fn new() -> Self {
         let num_players = 2;
         let mut gb = GameBoard {
-            my_num_players: num_players,
-            max_num_factories: num_players + 1,
+            _my_num_players: num_players,
+            max_num_factories: num_players * 2 + 1,
             tile_pool: HashMap::new(),
             tile_bag: Vec::new(),
             tile_factories: Vec::new(),
             white_tile_in_pool: true,
-            last_round: false,
         }; // GameBoard
         gb.reset_board();
         gb
@@ -233,10 +223,9 @@ impl GameBoard {
                         let _ = response.insert("success", true);
                         let _ = response.insert("num_tiles_returned", num);
                     }
-                    Err(error) => {
+                    Err(_error) => {
                         let _ = response.insert("success", false);
                         let _ = response.insert("num_tiles_returned", 0);
-                        response["error_type"] = "Invalid move".into();
                     }
                 }
             }
@@ -255,7 +244,7 @@ impl GameBoard {
                             let _ = response.insert("pool_penalty", false);
                         }
                     }
-                    Err(error) => {
+                    Err(_error) => {
                         let _ = response.insert("success", false);
                         let _ = response.insert("num_tiles_returned", 0);
                         response["error_type"] = "Invalid move".into();
@@ -288,7 +277,7 @@ impl GameBoard {
                         let _ = response.insert("success", true);
                         let _ = response.insert("num_tiles_returned", num);
                     }
-                    Err(error) => {
+                    Err(_error) => {
                         let _ = response.insert("success", false);
                         let _ = response.insert("num_tiles_returned", 0);
                         response["error_type"] = "Invalid move".into();
@@ -310,7 +299,7 @@ impl GameBoard {
                             let _ = response.insert("pool_penalty", false);
                         }
                     }
-                    Err(error) => {
+                    Err(_error) => {
                         let _ = response.insert("success", false);
                         let _ = response.insert("num_tiles_returned", 0);
                         response["error_type"] = "Invalid move".into();
@@ -420,7 +409,6 @@ struct Player {
 }
 
 impl<'a> Player {
-    const PROMPT_DRAW_INPUT: &'a str = "What would you like to do?";
     const PROMPT_FACTORY_DRAW: &'a str = "[f] take from factory ";
     const PROMPT_POOL_DRAW: &'a str = "[p] take from pool ";
     const PROMPT_DISCARD: &'a str = "[d] discard tile(s) ";
@@ -579,7 +567,7 @@ impl<'a> Player {
         }
         for ii in 0..NUM_COLORS_AS_USIZE {
             lines.push_str(format! {"{}) ", ii+1}.as_str());
-            for jj in ii + 1..NUM_COLORS_AS_USIZE {
+            for _ in ii + 1..NUM_COLORS_AS_USIZE {
                 lines.push_str(" ");
             }
             for jj in (0..ii + 1).rev() {
@@ -919,27 +907,11 @@ impl<'a> Player {
         }
         PENALTY_POINTS[num_penalties]
     } // fn get_score_penalty
-    fn took_penalty(&self) -> bool {
-        self.my_took_pool_penalty_this_round
-    }
     fn end_game(&mut self) -> i32 {
         self.my_score += finalize_score(&self.my_grid);
         self.my_score
     }
-    // implement display trait to print?
-    fn to_string(&self) -> String {
-        format!(
-            "***************************\nPLAYER: {}\n",
-            self.my_player_id
-        )
-    }
 } // impl PLayer
-impl fmt::Display for Player {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        self.to_string();
-        Ok(())
-    }
-}
 fn finalize_score(grid: &Array2<bool>) -> i32 {
     let mut score_bonus = 0;
     let mut num_rows = 0;
@@ -1109,7 +1081,7 @@ fn give_turn(
                     sender.send(response).unwrap();
                 }
             }
-            Err(error) => continue,
+            Err(_error) => continue,
         };
     } // end loop
 } // fn give_turn
@@ -1134,7 +1106,7 @@ fn spawn_player(mut player: Player) -> thread::JoinHandle<()> {
                         game_over = true;
                     }
                 }
-                Err(error) => continue,
+                Err(_error) => continue,
             }
         }
     });
@@ -1146,14 +1118,12 @@ pub fn run_game() {
     let (gameboard_to_player2_sender, player2_receiver) = mpsc::channel();
     let (player1_to_gameboard_sender, gameboard_receiver) = mpsc::channel();
     let player2_to_gameboard_sender = player1_to_gameboard_sender.clone();
-    let mut player_1 = Player::new(1, player1_to_gameboard_sender, player1_receiver);
-    let mut player_2 = Player::new(2, player2_to_gameboard_sender, player2_receiver);
+    let player_1 = Player::new(1, player1_to_gameboard_sender, player1_receiver);
+    let player_2 = Player::new(2, player2_to_gameboard_sender, player2_receiver);
+    // TODO - implement for >2 players
     let p1_handle = spawn_player(player_1);
     let p2_handle = spawn_player(player_2);
     let mut end_game: bool = false;
-    let mut first_player_idx = 0;
-    // let num_players = players.len();
-    let num_players = 2;
     let mut players = vec![
         (&gameboard_to_player1_sender, 1),
         (&gameboard_to_player2_sender, 2),
