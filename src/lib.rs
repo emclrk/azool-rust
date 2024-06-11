@@ -1009,7 +1009,7 @@ fn test_msg_processing_invalid_type() {
     let mut game_board = GameBoard::new();
     game_board.deal_tiles();
     let request = object! {"req_type": "brglker"};
-    let result = game_board.process_msg(request).unwrap();
+    let _ = game_board.process_msg(request).unwrap();
 }
 #[test]
 fn test_msg_processing_factory_draw() {
@@ -1035,7 +1035,6 @@ fn test_msg_processing_pool_draw() {
     game_board.deal_tiles();
     let error_msg =
         format! {"Something wrong with our tile factories? {:#?}", game_board.tile_factories};
-    let num_factories = game_board.tile_factories.len();
     while game_board.tile_factories[0].keys().len() == 1 {
         // if the first factory is all of the same tile, drawing won't put anything in the pool
         // so re-deal until it works
